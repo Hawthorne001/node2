@@ -27,7 +27,11 @@
 
   'conditions': [
     [ 'clang==1', {
-      'cflags': [ '-Werror=undefined-inline', '-Werror=extra-semi']
+      'cflags': [
+        '-Werror=undefined-inline',
+        '-Werror=extra-semi',
+        '-Werror=ctad-maybe-unsupported',
+      ],
     }],
     [ '"<(_type)"=="executable"', {
       'msvs_settings': {
@@ -148,7 +152,7 @@
           'msvs_settings': {
             'VCLinkerTool': {
               'AdditionalOptions': [
-                '/WHOLEARCHIVE:zlib<(STATIC_LIB_SUFFIX)',
+                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/zlib<(STATIC_LIB_SUFFIX)',
               ],
             },
           },
@@ -187,7 +191,7 @@
           'msvs_settings': {
             'VCLinkerTool': {
               'AdditionalOptions': [
-                '/WHOLEARCHIVE:libuv<(STATIC_LIB_SUFFIX)',
+                '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/libuv<(STATIC_LIB_SUFFIX)',
               ],
             },
           },
@@ -204,16 +208,36 @@
       ],
     }],
 
+    [ 'node_shared_uvwasi=="false"', {
+      'dependencies': [ 'deps/uvwasi/uvwasi.gyp:uvwasi' ],
+    }],
+
     [ 'node_shared_nghttp2=="false"', {
       'dependencies': [ 'deps/nghttp2/nghttp2.gyp:nghttp2' ],
+    }],
+
+    [ 'node_shared_ada=="false"', {
+        'dependencies': [ 'deps/ada/ada.gyp:ada' ],
+    }],
+
+    [ 'node_shared_simdjson=="false"', {
+        'dependencies': [ 'deps/simdjson/simdjson.gyp:simdjson' ],
+    }],
+
+    [ 'node_shared_simdutf=="false"', {
+        'dependencies': [ 'deps/simdutf/simdutf.gyp:simdutf' ],
     }],
 
     [ 'node_shared_brotli=="false"', {
       'dependencies': [ 'deps/brotli/brotli.gyp:brotli' ],
     }],
 
+    [ 'node_shared_sqlite=="false"', {
+      'dependencies': [ 'deps/sqlite/sqlite.gyp:sqlite' ],
+    }],
+
     [ 'OS=="mac"', {
-      # linking Corefoundation is needed since certain OSX debugging tools
+      # linking Corefoundation is needed since certain macOS debugging tools
       # like Instruments require it for some features
       'libraries': [ '-framework CoreFoundation' ],
       'defines!': [
@@ -366,7 +390,7 @@
               'msvs_settings': {
                 'VCLinkerTool': {
                   'AdditionalOptions': [
-                    '/WHOLEARCHIVE:<(openssl_product)',
+                    '/WHOLEARCHIVE:<(PRODUCT_DIR)/lib/<(openssl_product)',
                   ],
                 },
               },
@@ -399,6 +423,11 @@
       ]
     }, {
       'defines': [ 'HAVE_OPENSSL=0' ]
+    }],
+    [ 'node_use_amaro=="true"', {
+      'defines': [ 'HAVE_AMARO=1' ],
+    }, {
+      'defines': [ 'HAVE_AMARO=0' ]
     }],
   ],
 }

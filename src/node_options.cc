@@ -23,6 +23,7 @@ using v8::FunctionCallbackInfo;
 using v8::Integer;
 using v8::Isolate;
 using v8::Local;
+using v8::LocalVector;
 using v8::Map;
 using v8::Name;
 using v8::Null;
@@ -107,24 +108,13 @@ void PerIsolateOptions::CheckOptions(std::vector<std::string>* errors,
 
 void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
                                       std::vector<std::string>* argv) {
-  if (has_policy_integrity_string && experimental_policy.empty()) {
-    errors->push_back("--policy-integrity requires "
-                      "--experimental-policy be enabled");
-  }
-  if (has_policy_integrity_string && experimental_policy_integrity.empty()) {
-    errors->push_back("--policy-integrity cannot be empty");
-  }
-
   if (!input_type.empty()) {
-    if (input_type != "commonjs" && input_type != "module") {
-      errors->push_back("--input-type must be \"module\" or \"commonjs\"");
-    }
-  }
-
-  if (!type.empty()) {
-    if (type != "commonjs" && type != "module") {
-      errors->push_back("--experimental-default-type must be "
-                        "\"module\" or \"commonjs\"");
+    if (input_type != "commonjs" && input_type != "module" &&
+        input_type != "commonjs-typescript" &&
+        input_type != "module-typescript") {
+      errors->push_back(
+          "--input-type must be \"module\","
+          "\"commonjs\", \"module-typescript\" or \"commonjs-typescript\"");
     }
   }
 
@@ -150,7 +140,24 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
     errors->push_back("--heapsnapshot-near-heap-limit must not be negative");
   }
 
+  if (!trace_require_module.empty() && trace_require_module != "all" &&
+      trace_require_module != "no-node-modules") {
+    errors->push_back("invalid value for --trace-require-module");
+  }
+
   if (test_runner) {
+    if (test_isolation == "none") {
+      debug_options_.allow_attaching_debugger = true;
+    } else {
+      if (test_isolation != "process") {
+        errors->push_back("invalid value for --test-isolation");
+      }
+
+#ifndef ALLOW_ATTACHING_DEBUGGER_IN_TEST_RUNNER
+      debug_options_.allow_attaching_debugger = false;
+#endif
+    }
+
     if (syntax_check_only) {
       errors->push_back("either --test or --check can be used, not both");
     }
@@ -167,10 +174,6 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors,
       errors->push_back(
           "--watch-path cannot be used in combination with --test");
     }
-
-#ifndef ALLOW_ATTACHING_DEBUGGER_IN_TEST_RUNNER
-    debug_options_.allow_attaching_debugger = false;
-#endif
   }
 
   if (watch_mode) {
@@ -339,6 +342,14 @@ DebugOptionsParser::DebugOptionsParser() {
   Implies("--inspect-brk-node", "--inspect");
   AddAlias("--inspect-brk-node=", { "--inspect-port", "--inspect-brk-node" });
 
+  AddOption(
+      "--inspect-wait",
+      "activate inspector on host:port and wait for debugger to be attached",
+      &DebugOptions::inspect_wait,
+      kAllowedInEnvvar);
+  Implies("--inspect-wait", "--inspect");
+  AddAlias("--inspect-wait=", {"--inspect-port", "--inspect-wait"});
+
   AddOption("--inspect-publish-uid",
             "comma separated list of destinations for inspector uid"
             "(default: stderr,http)",
@@ -356,7 +367,8 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "when ambiguous modules fail to evaluate because they contain "
             "ES module syntax, try again to evaluate them as ES modules",
             &EnvironmentOptions::detect_module,
-            kAllowedInEnvvar);
+            kAllowedInEnvvar,
+            true);
   AddOption("--experimental-print-required-tla",
             "Print pending top-level await. If --experimental-require-module "
             "is true, evaluate asynchronous graphs loaded by `require()` but "
@@ -365,14 +377,20 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::print_required_tla,
             kAllowedInEnvvar);
   AddOption("--experimental-require-module",
-            "Allow loading explicit ES Modules in require().",
+            "Allow loading synchronous ES Modules in require().",
             &EnvironmentOptions::require_module,
-            kAllowedInEnvvar);
+            kAllowedInEnvvar,
+            true);
   AddOption("--diagnostic-dir",
             "set dir for all output files"
             " (default: current working directory)",
             &EnvironmentOptions::diagnostic_dir,
             kAllowedInEnvvar);
+  AddOption("--disable-sigusr1",
+            "Disable inspector thread to be listening for SIGUSR1 signal",
+            &EnvironmentOptions::disable_sigusr1,
+            kAllowedInEnvvar,
+            false);
   AddOption("--dns-result-order",
             "set default value of verbatim in dns.lookup. Options are "
             "'ipv4first' (IPv4 addresses are placed before IPv6 addresses) "
@@ -397,7 +415,20 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "Source Map V3 support for stack traces",
             &EnvironmentOptions::enable_source_maps,
             kAllowedInEnvvar);
+  AddOption("--entry-url",
+            "Treat the entrypoint as a URL",
+            &EnvironmentOptions::entry_is_url,
+            kAllowedInEnvvar);
+  AddOption("--experimental-addon-modules",
+            "experimental import support for addons",
+            &EnvironmentOptions::experimental_addon_modules,
+            kAllowedInEnvvar);
   AddOption("--experimental-abortcontroller", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--experimental-eventsource",
+            "experimental EventSource API",
+            &EnvironmentOptions::experimental_eventsource,
+            kAllowedInEnvvar,
+            false);
   AddOption("--experimental-fetch", "", NoOp{}, kAllowedInEnvvar);
   AddOption("--experimental-websocket",
             "experimental WebSocket API",
@@ -405,6 +436,23 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             kAllowedInEnvvar,
             true);
   AddOption("--experimental-global-customevent", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--experimental-sqlite",
+            "experimental node:sqlite module",
+            &EnvironmentOptions::experimental_sqlite,
+            kAllowedInEnvvar,
+            true);
+  AddOption("--experimental-quic",
+            "experimental QUIC API",
+            &EnvironmentOptions::experimental_quic,
+            kAllowedInEnvvar);
+  AddOption("--experimental-webstorage",
+            "experimental Web Storage API",
+            &EnvironmentOptions::experimental_webstorage,
+            kAllowedInEnvvar);
+  AddOption("--localstorage-file",
+            "file used to persist localStorage data",
+            &EnvironmentOptions::localstorage_file,
+            kAllowedInEnvvar);
   AddOption("--experimental-global-navigator",
             "expose experimental Navigator API on the global scope",
             &EnvironmentOptions::experimental_global_navigator,
@@ -418,10 +466,6 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             kAllowedInEnvvar);
   AddAlias("--loader", "--experimental-loader");
   AddOption("--experimental-modules", "", NoOp{}, kAllowedInEnvvar);
-  AddOption("--experimental-network-imports",
-            "experimental https: support for the ES Module loader",
-            &EnvironmentOptions::experimental_https_modules,
-            kAllowedInEnvvar);
   AddOption("--experimental-wasm-modules",
             "experimental ES Module support for webassembly modules",
             &EnvironmentOptions::experimental_wasm_modules,
@@ -430,25 +474,11 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "experimental ES Module import.meta.resolve() parentURL support",
             &EnvironmentOptions::experimental_import_meta_resolve,
             kAllowedInEnvvar);
-  AddOption("--experimental-permission",
+  AddOption("--permission",
             "enable the permission system",
-            &EnvironmentOptions::experimental_permission,
+            &EnvironmentOptions::permission,
             kAllowedInEnvvar,
             false);
-  AddOption("--experimental-policy",
-            "use the specified file as a "
-            "security policy",
-            &EnvironmentOptions::experimental_policy,
-            kAllowedInEnvvar);
-  AddOption("[has_policy_integrity_string]",
-            "",
-            &EnvironmentOptions::has_policy_integrity_string);
-  AddOption("--policy-integrity",
-            "ensure the security policy contents match "
-            "the specified integrity",
-            &EnvironmentOptions::experimental_policy_integrity,
-            kAllowedInEnvvar);
-  Implies("--policy-integrity", "[has_policy_integrity_string]");
   AddOption("--allow-fs-read",
             "allow permissions to read the filesystem",
             &EnvironmentOptions::allow_fs_read,
@@ -464,6 +494,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--allow-child-process",
             "allow use of child process when any permissions are set",
             &EnvironmentOptions::allow_child_process,
+            kAllowedInEnvvar);
+  AddOption("--allow-wasi",
+            "allow wasi when any permissions are set",
+            &EnvironmentOptions::allow_wasi,
             kAllowedInEnvvar);
   AddOption("--allow-worker",
             "allow worker threads when any permissions are set",
@@ -482,6 +516,12 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--experimental-report", "", NoOp{}, kAllowedInEnvvar);
   AddOption(
       "--experimental-wasi-unstable-preview1", "", NoOp{}, kAllowedInEnvvar);
+  AddOption("--expose-gc", "expose gc extension", V8Option{}, kAllowedInEnvvar);
+  AddOption("--async-context-frame",
+            "Improve AsyncLocalStorage performance with AsyncContextFrame",
+            &EnvironmentOptions::async_context_frame,
+            kAllowedInEnvvar,
+            true);
   AddOption("--expose-internals", "", &EnvironmentOptions::expose_internals);
   AddOption("--frozen-intrinsics",
             "experimental frozen intrinsics support",
@@ -587,24 +627,31 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "Directory where the V8 profiles generated by --cpu-prof will be "
             "placed. Does not affect --prof.",
             &EnvironmentOptions::cpu_prof_dir);
+  AddOption("--experimental-network-inspection",
+            "experimental network inspection support",
+            &EnvironmentOptions::experimental_network_inspection);
   AddOption(
       "--heap-prof",
       "Start the V8 heap profiler on start up, and write the heap profile "
       "to disk before exit. If --heap-prof-dir is not specified, write "
       "the profile to the current working directory.",
-      &EnvironmentOptions::heap_prof);
+      &EnvironmentOptions::heap_prof,
+      kAllowedInEnvvar);
   AddOption("--heap-prof-name",
             "specified file name of the V8 heap profile generated with "
             "--heap-prof",
-            &EnvironmentOptions::heap_prof_name);
+            &EnvironmentOptions::heap_prof_name,
+            kAllowedInEnvvar);
   AddOption("--heap-prof-dir",
             "Directory where the V8 heap profiles generated by --heap-prof "
             "will be placed.",
-            &EnvironmentOptions::heap_prof_dir);
+            &EnvironmentOptions::heap_prof_dir,
+            kAllowedInEnvvar);
   AddOption("--heap-prof-interval",
             "specified sampling interval in bytes for the V8 heap "
             "profile generated with --heap-prof. (default: 512 * 1024)",
-            &EnvironmentOptions::heap_prof_interval);
+            &EnvironmentOptions::heap_prof_interval,
+            kAllowedInEnvvar);
 #endif  // HAVE_INSPECTOR
   AddOption("--max-http-header-size",
             "set the maximum size of HTTP headers (default: 16384 (16KB))",
@@ -620,6 +667,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "set environment variables from supplied file",
             &EnvironmentOptions::env_file);
   Implies("--env-file", "[has_env_file_string]");
+  AddOption("--env-file-if-exists",
+            "set environment variables from supplied file",
+            &EnvironmentOptions::optional_env_file);
+  Implies("--env-file-if-exists", "[has_env_file_string]");
   AddOption("--test",
             "launch test runner on startup",
             &EnvironmentOptions::test_runner);
@@ -632,12 +683,38 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--test-timeout",
             "specify test runner timeout",
             &EnvironmentOptions::test_runner_timeout);
+  AddOption("--test-update-snapshots",
+            "regenerate test snapshots",
+            &EnvironmentOptions::test_runner_update_snapshots);
   AddOption("--experimental-test-coverage",
             "enable code coverage in the test runner",
             &EnvironmentOptions::test_runner_coverage);
+  AddOption("--test-coverage-branches",
+            "the branch coverage minimum threshold",
+            &EnvironmentOptions::test_coverage_branches,
+            kAllowedInEnvvar);
+  AddOption("--test-coverage-functions",
+            "the function coverage minimum threshold",
+            &EnvironmentOptions::test_coverage_functions,
+            kAllowedInEnvvar);
+  AddOption("--test-coverage-lines",
+            "the line coverage minimum threshold",
+            &EnvironmentOptions::test_coverage_lines,
+            kAllowedInEnvvar);
+  AddOption("--test-isolation",
+            "configures the type of test isolation used in the test runner",
+            &EnvironmentOptions::test_isolation,
+            kAllowedInEnvvar);
+  // TODO(cjihrig): Remove this alias in a semver major.
+  AddAlias("--experimental-test-isolation", "--test-isolation");
+  AddOption("--experimental-test-module-mocks",
+            "enable module mocking in the test runner",
+            &EnvironmentOptions::test_runner_module_mocks);
+  AddOption("--experimental-test-snapshots", "", NoOp{});
   AddOption("--test-name-pattern",
             "run tests whose name matches this regular expression",
-            &EnvironmentOptions::test_name_pattern);
+            &EnvironmentOptions::test_name_pattern,
+            kAllowedInEnvvar);
   AddOption("--test-reporter",
             "report test output using the given reporter",
             &EnvironmentOptions::test_reporter,
@@ -656,7 +733,16 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             kAllowedInEnvvar);
   AddOption("--test-skip-pattern",
             "run tests whose name do not match this regular expression",
-            &EnvironmentOptions::test_skip_pattern);
+            &EnvironmentOptions::test_skip_pattern,
+            kAllowedInEnvvar);
+  AddOption("--test-coverage-include",
+            "include files in coverage report that match this glob pattern",
+            &EnvironmentOptions::coverage_include_pattern,
+            kAllowedInEnvvar);
+  AddOption("--test-coverage-exclude",
+            "exclude files from coverage report that match this glob pattern",
+            &EnvironmentOptions::coverage_exclude_pattern,
+            kAllowedInEnvvar);
   AddOption("--test-udp-no-try-send", "",  // For testing only.
             &EnvironmentOptions::test_udp_no_try_send);
   AddOption("--throw-deprecation",
@@ -692,10 +778,31 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "show stack traces on promise initialization and resolution",
             &EnvironmentOptions::trace_promises,
             kAllowedInEnvvar);
-  AddOption("--experimental-default-type",
-            "set module system to use by default",
-            &EnvironmentOptions::type,
+
+  AddOption("--trace-env",
+            "Print accesses to the environment variables",
+            &EnvironmentOptions::trace_env,
             kAllowedInEnvvar);
+  Implies("--trace-env-js-stack", "--trace-env");
+  Implies("--trace-env-native-stack", "--trace-env");
+  AddOption("--trace-env-js-stack",
+            "Print accesses to the environment variables and the JavaScript "
+            "stack trace",
+            &EnvironmentOptions::trace_env_js_stack,
+            kAllowedInEnvvar);
+  AddOption(
+      "--trace-env-native-stack",
+      "Print accesses to the environment variables and the native stack trace",
+      &EnvironmentOptions::trace_env_native_stack,
+      kAllowedInEnvvar);
+
+  AddOption(
+      "--trace-require-module",
+      "Print access to require(esm). Options are 'all' (print all usage) and "
+      "'no-node-modules' (excluding usage from the node_modules folder)",
+      &EnvironmentOptions::trace_require_module,
+      kAllowedInEnvvar);
+
   AddOption("--extra-info-on-fatal-exception",
             "hide extra information on fatal exception that causes exit",
             &EnvironmentOptions::extra_info_on_fatal_exception,
@@ -756,6 +863,18 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "ES module to preload (option can be repeated)",
             &EnvironmentOptions::preload_esm_modules,
             kAllowedInEnvvar);
+  AddOption("--experimental-strip-types",
+            "Experimental type-stripping for TypeScript files.",
+            &EnvironmentOptions::experimental_strip_types,
+            kAllowedInEnvvar,
+            true);
+  AddOption("--experimental-transform-types",
+            "enable transformation of TypeScript-only"
+            "syntax into JavaScript code",
+            &EnvironmentOptions::experimental_transform_types,
+            kAllowedInEnvvar);
+  Implies("--experimental-transform-types", "--experimental-strip-types");
+  Implies("--experimental-transform-types", "--enable-source-maps");
   AddOption("--interactive",
             "always enter the REPL even if stdin does not appear "
             "to be a terminal",
@@ -798,6 +917,11 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::tls_max_v1_3,
             kAllowedInEnvvar);
 
+  AddOption("--report-exclude-env",
+            "Exclude environment variables when generating report"
+            " (default: false)",
+            &EnvironmentOptions::report_exclude_env,
+            kAllowedInEnvvar);
   AddOption("--report-exclude-network",
             "exclude network interface diagnostics."
             " (default: false)",
@@ -829,14 +953,12 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
       "--perf-basic-prof-only-functions", "", V8Option{}, kAllowedInEnvvar);
   AddOption("--perf-prof", "", V8Option{}, kAllowedInEnvvar);
   AddOption("--perf-prof-unwinding-info", "", V8Option{}, kAllowedInEnvvar);
-  AddOption("--stack-trace-limit", "", V8Option{}, kAllowedInEnvvar);
+  AddOption("--stack-trace-limit",
+            "",
+            &PerIsolateOptions::stack_trace_limit,
+            kAllowedInEnvvar);
   AddOption("--disallow-code-generation-from-strings",
             "disallow eval and friends",
-            V8Option{},
-            kAllowedInEnvvar);
-  AddOption("--huge-max-old-generation-size",
-            "increase default maximum heap size on machines with 16GB memory "
-            "or more",
             V8Option{},
             kAllowedInEnvvar);
   AddOption("--jitless",
@@ -1072,6 +1194,13 @@ PerProcessOptionsParser::PerProcessOptionsParser(
   AddOption("--run",
             "Run a script specified in package.json",
             &PerProcessOptions::run);
+  AddOption(
+      "--disable-wasm-trap-handler",
+      "Disable trap-handler-based WebAssembly bound checks. V8 will insert "
+      "inline bound checks when compiling WebAssembly which may slow down "
+      "performance.",
+      &PerProcessOptions::disable_wasm_trap_handler,
+      kAllowedInEnvvar);
 }
 
 inline std::string RemoveBrackets(const std::string& host) {
@@ -1088,7 +1217,7 @@ inline uint16_t ParseAndValidatePort(const std::string_view port,
 
   if (r.ec == std::errc::result_out_of_range ||
       (result != 0 && result < 1024)) {
-    errors->push_back(" must be 0 or in range 1024 to 65535.");
+    errors->push_back("must be 0 or in range 1024 to 65535.");
   }
 
   return result;
@@ -1192,8 +1321,8 @@ void GetCLIOptionsValues(const FunctionCallbackInfo<Value>& args) {
   Mutex::ScopedLock lock(per_process::cli_options_mutex);
   IterateCLIOptionsScope s(env);
 
-  std::vector<Local<Name>> option_names;
-  std::vector<Local<Value>> option_values;
+  LocalVector<Name> option_names(isolate);
+  LocalVector<Value> option_values(isolate);
   option_names.reserve(_ppop_instance.options_.size() * 2);
   option_values.reserve(_ppop_instance.options_.size() * 2);
 
@@ -1214,6 +1343,11 @@ void GetCLIOptionsValues(const FunctionCallbackInfo<Value>& args) {
         if (item.first == "--abort-on-uncaught-exception") {
           value = Boolean::New(isolate,
                                s.original_per_env->abort_on_uncaught_exception);
+        } else if (item.first == "--stack-trace-limit") {
+          value =
+              Number::New(isolate,
+                          static_cast<double>(
+                              *_ppop_instance.Lookup<int64_t>(field, opts)));
         } else {
           value = undefined_value;
         }
@@ -1306,7 +1440,8 @@ void GetCLIOptionsInfo(const FunctionCallbackInfo<Value>& args) {
 
   Local<Map> options = Map::New(isolate);
   if (options
-          ->SetPrototype(context, env->primordials_safe_map_prototype_object())
+          ->SetPrototypeV2(context,
+                           env->primordials_safe_map_prototype_object())
           .IsNothing()) {
     return;
   }
@@ -1346,7 +1481,8 @@ void GetCLIOptionsInfo(const FunctionCallbackInfo<Value>& args) {
   if (!ToV8Value(context, _ppop_instance.aliases_).ToLocal(&aliases)) return;
 
   if (aliases.As<Object>()
-          ->SetPrototype(context, env->primordials_safe_map_prototype_object())
+          ->SetPrototypeV2(context,
+                           env->primordials_safe_map_prototype_object())
           .IsNothing()) {
     return;
   }

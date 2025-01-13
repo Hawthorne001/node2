@@ -13,8 +13,7 @@
 #include "defs.h"
 #include "sessionticket.h"
 
-namespace node {
-namespace quic {
+namespace node::quic {
 
 class Session;
 class TLSContext;
@@ -29,12 +28,13 @@ class TLSSession final : public MemoryRetainer {
  public:
   static const TLSSession& From(const SSL* ssl);
 
-  // The constructor is public in order to satisify the call to std::make_unique
+  // The constructor is public in order to satisfy the call to std::make_unique
   // in TLSContext::NewSession. It should not be called directly.
   TLSSession(Session* session,
              std::shared_ptr<TLSContext> context,
              const std::optional<SessionTicket>& maybeSessionTicket);
   DISALLOW_COPY_AND_MOVE(TLSSession)
+  ~TLSSession();
 
   inline operator bool() const { return ssl_ != nullptr; }
   inline Session& session() const { return *session_; }
@@ -55,7 +55,7 @@ class TLSSession final : public MemoryRetainer {
   const std::string_view servername() const;
 
   // The ALPN (protocol name) negotiated for the session
-  const std::string_view alpn() const;
+  const std::string_view protocol() const;
 
   // Triggers key update to begin. This will fail and return false if either a
   // previous key update is in progress or if the initial handshake has not yet
@@ -114,11 +114,11 @@ class TLSContext final : public MemoryRetainer,
   struct Options final : public MemoryRetainer {
     // The SNI servername to use for this session. This option is only used by
     // the client.
-    std::string sni = "localhost";
+    std::string servername = "localhost";
 
     // The ALPN (protocol name) to use for this session. This option is only
     // used by the client.
-    std::string alpn = NGHTTP3_ALPN_H3;
+    std::string protocol = NGHTTP3_ALPN_H3;
 
     // The list of TLS ciphers to use for this session.
     std::string ciphers = DEFAULT_CIPHERS;
@@ -147,7 +147,7 @@ class TLSContext final : public MemoryRetainer,
 
     // The TLS private key(s) to use for this session.
     // JavaScript option name "keys"
-    std::vector<std::shared_ptr<crypto::KeyObjectData>> keys;
+    std::vector<crypto::KeyObjectData> keys;
 
     // Collection of certificates to use for this session.
     // JavaScript option name "certs"
@@ -221,8 +221,7 @@ class TLSContext final : public MemoryRetainer,
   friend class TLSSession;
 };
 
-}  // namespace quic
-}  // namespace node
+}  // namespace node::quic
 
 #endif  // HAVE_OPENSSL && NODE_OPENSSL_HAS_QUIC
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS

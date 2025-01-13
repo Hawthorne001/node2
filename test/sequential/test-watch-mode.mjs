@@ -8,12 +8,13 @@ import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { inspect } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 
 if (common.isIBMi)
   common.skip('IBMi does not support `fs.watch()`');
 
-const supportsRecursive = common.isOSX || common.isWindows;
+const supportsRecursive = common.isMacOS || common.isWindows;
 
 function restart(file, content = readFileSync(file)) {
   // To avoid flakiness, we save the file repeatedly until test is done
@@ -27,6 +28,66 @@ function createTmpFile(content = 'console.log("running");', ext = '.js', basenam
   const file = path.join(basename, `${tmpFiles++}${ext}`);
   writeFileSync(file, content);
   return file;
+}
+
+function runInBackground({ args = [], options = {}, completed = 'Completed running', shouldFail = false }) {
+  let future = Promise.withResolvers();
+  let child;
+  let stderr = '';
+  let stdout = [];
+
+  const run = () => {
+    args.unshift('--no-warnings');
+    child = spawn(execPath, args, { encoding: 'utf8', stdio: 'pipe', ...options });
+
+    child.stderr.on('data', (data) => {
+      stderr += data;
+    });
+
+    const rl = createInterface({ input: child.stdout });
+    rl.on('line', (data) => {
+      if (!data.startsWith('Waiting for graceful termination') && !data.startsWith('Gracefully restarted')) {
+        stdout.push(data);
+        if (data.startsWith(completed)) {
+          future.resolve({ stderr, stdout });
+          future = Promise.withResolvers();
+          stdout = [];
+          stderr = '';
+        } else if (data.startsWith('Failed running')) {
+          if (shouldFail) {
+            future.resolve({ stderr, stdout });
+          } else {
+            future.reject({ stderr, stdout });
+          }
+          future = Promise.withResolvers();
+          stdout = [];
+          stderr = '';
+        }
+      }
+    });
+  };
+
+  return {
+    async done() {
+      child?.kill();
+      future.resolve();
+      return { stdout, stderr };
+    },
+    restart(timeout = 1000) {
+      if (!child) {
+        run();
+      }
+      const timer = setTimeout(() => {
+        if (!future.resolved) {
+          child.kill();
+          future.reject(new Error('Timed out waiting for restart'));
+        }
+      }, timeout);
+      return future.promise.finally(() => {
+        clearTimeout(timer);
+      });
+    }
+  };
 }
 
 async function runWriteSucceed({
@@ -129,6 +190,56 @@ describe('watch mode', { concurrency: !process.env.TEST_PARALLEL, timeout: 60_00
       'running',
       `Completed running ${inspect(file)}`,
     ]);
+  });
+
+  it('should reload env variables when --env-file changes', async () => {
+    const envKey = `TEST_ENV_${Date.now()}`;
+    const jsFile = createTmpFile(`console.log('ENV: ' + process.env.${envKey});`);
+    const envFile = createTmpFile(`${envKey}=value1`, '.env');
+    const { done, restart } = runInBackground({ args: ['--watch', `--env-file=${envFile}`, jsFile] });
+
+    try {
+      await restart();
+      writeFileSync(envFile, `${envKey}=value2`);
+
+      // Second restart, after env change
+      const { stdout, stderr } = await restart();
+
+      assert.strictEqual(stderr, '');
+      assert.deepStrictEqual(stdout, [
+        `Restarting ${inspect(jsFile)}`,
+        'ENV: value2',
+        `Completed running ${inspect(jsFile)}`,
+      ]);
+    } finally {
+      await done();
+    }
+  });
+
+  it('should load new env variables when --env-file changes', async () => {
+    const envKey = `TEST_ENV_${Date.now()}`;
+    const envKey2 = `TEST_ENV_2_${Date.now()}`;
+    const jsFile = createTmpFile(`console.log('ENV: ' + process.env.${envKey} + '\\n' + 'ENV2: ' + process.env.${envKey2});`);
+    const envFile = createTmpFile(`${envKey}=value1`, '.env');
+    const { done, restart } = runInBackground({ args: ['--watch', `--env-file=${envFile}`, jsFile] });
+
+    try {
+      await restart();
+      writeFileSync(envFile, `${envKey}=value1\n${envKey2}=newValue`);
+
+      // Second restart, after env change
+      const { stderr, stdout } = await restart();
+
+      assert.strictEqual(stderr, '');
+      assert.deepStrictEqual(stdout, [
+        `Restarting ${inspect(jsFile)}`,
+        'ENV: value1',
+        'ENV2: newValue',
+        `Completed running ${inspect(jsFile)}`,
+      ]);
+    } finally {
+      await done();
+    }
   });
 
   it('should watch changes to a failing file', async () => {
@@ -571,6 +682,86 @@ console.log(values.random);
       `Restarting ${inspect(file)}`,
       'hello',
       'running',
+      `Completed running ${inspect(file)}`,
+    ]);
+  });
+
+  it('should pass IPC messages from a spawning parent to the child and back', async () => {
+    const file = createTmpFile(`console.log('running');
+process.on('message', (message) => {
+  if (message === 'exit') {
+    process.exit(0);
+  } else {
+    console.log('Received:', message);
+    process.send(message);
+  }
+})`);
+
+    const child = spawn(
+      execPath,
+      [
+        '--watch',
+        '--no-warnings',
+        file,
+      ],
+      {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      },
+    );
+
+    let stderr = '';
+    let stdout = '';
+
+    child.stdout.on('data', (data) => stdout += data);
+    child.stderr.on('data', (data) => stderr += data);
+    async function waitForEcho(msg) {
+      const receivedPromise = new Promise((resolve) => {
+        const fn = (message) => {
+          if (message === msg) {
+            child.off('message', fn);
+            resolve();
+          }
+        };
+        child.on('message', fn);
+      });
+      child.send(msg);
+      await receivedPromise;
+    }
+
+    async function waitForText(text) {
+      const seenPromise = new Promise((resolve) => {
+        const fn = (data) => {
+          if (data.toString().includes(text)) {
+            resolve();
+            child.stdout.off('data', fn);
+          }
+        };
+        child.stdout.on('data', fn);
+      });
+      await seenPromise;
+    }
+
+    await waitForText('running');
+    await waitForEcho('first message');
+    const stopRestarts = restart(file);
+    await waitForText('running');
+    stopRestarts();
+    await waitForEcho('second message');
+    const exitedPromise = once(child, 'exit');
+    child.send('exit');
+    await waitForText('Completed');
+    child.disconnect();
+    child.kill();
+    await exitedPromise;
+    assert.strictEqual(stderr, '');
+    const lines = stdout.split(/\r?\n/).filter(Boolean);
+    assert.deepStrictEqual(lines, [
+      'running',
+      'Received: first message',
+      `Restarting ${inspect(file)}`,
+      'running',
+      'Received: second message',
       `Completed running ${inspect(file)}`,
     ]);
   });
